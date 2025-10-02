@@ -164,6 +164,7 @@ public abstract  class OpFunctionBase extends AbstractOpBasic {
             {
                 if(labelMapOldNew.containsKey(currentLabel)) {
                     op.setLabel(labelMapOldNew.get(currentLabel));
+                    func.addLabel(labelMapOldNew.get(currentLabel), op);
                 }
                 else {
                     Label newLabel = mainProgram.newUniqueLabel();
@@ -205,6 +206,7 @@ public abstract  class OpFunctionBase extends AbstractOpBasic {
         }
         if(containsExit) {
             ops.getLast().setLabel(ExitLabel); //the last op is always constant assignment to result from y
+            func.addLabel(ExitLabel, ops.getLast());
         }
     }
 

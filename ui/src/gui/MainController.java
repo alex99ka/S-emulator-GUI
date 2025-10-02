@@ -706,7 +706,6 @@ public class MainController {
         stepBackButton.setDisable(!enable);
         stopButton.setDisable(!enable);
         resumeButton.setDisable(!enable);
-        debugTable.setDisable(!enable);
     }
 
     private void resetDebugVars()

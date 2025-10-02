@@ -9,5 +9,6 @@
     <orderEntry type="sourceFolder" forTests="false" />
     <orderEntry type="module" module-name="UI" />
     <orderEntry type="library" name="jaxb" level="project" />
+    <orderEntry type="library" name="JavaFx" level="project" />
   </component>
 </module>
