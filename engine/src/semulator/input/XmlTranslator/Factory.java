@@ -1,0 +1,436 @@
+package semulator.input.XmlTranslator;
+import jakarta.xml.bind.JAXBContext;
+import jakarta.xml.bind.JAXBException;
+import jakarta.xml.bind.Unmarshaller;
+import semulator.impl.api.basic.OpDecrease;
+import semulator.impl.api.basic.OpIncrease;
+import semulator.impl.api.basic.OpJumpNotZero;
+import semulator.impl.api.basic.OpNeutral;
+import semulator.impl.api.skeleton.AbstractOpBasic;
+import semulator.impl.api.skeleton.functionArgs.AbstractArgument;
+import semulator.impl.api.synthetic.*;
+import semulator.input.gen.*;
+import semulator.label.*;
+import semulator.program.*;
+import semulator.variable.*;
+
+import java.io.File;
+import java.util.*;
+
+class instructionCollect {
+    private LinkedHashSet<Label> definedLabels;
+    private List<XOp> sInstructions;
+
+    public instructionCollect(List<XOp> instructions)
+    {
+        this.sInstructions = instructions;
+    };
+
+    public void extractLabels()
+    {
+        // Collect all labels defined in the program
+        definedLabels = new LinkedHashSet<>();
+        for (XOp inst : sInstructions) {
+            if (inst.getLabel() != null) {
+                if (inst.getLabel().equals(FixedLabel.EXIT.getLabelRepresentation()))
+                    definedLabels.add(FixedLabel.EXIT);
+                else
+                    definedLabels.add(new LabelImpl(inst.getLabel()));
+            }
+        }
+    }
+    public LinkedHashSet<Label> getDefinedLabels() { return definedLabels; }
+    public List<XOp> getInstructions() { return sInstructions; }
+}
+
+public class Factory
+{
+    XProgram xProgram;
+
+    FunctionExecutor program;
+    private List<XFunction> xFunctions;
+    private Map<String, FunctionExecutor> functionsMap = new HashMap<>();
+    private List <FunctionExecutor> functions = new ArrayList<>();
+
+    public FunctionExecutor loadProgramFromXml(File xmlFile) throws IllegalArgumentException {
+        instructionCollect  collection;
+
+        program = null;
+        functionsMap.clear();
+        functions.clear();
+
+        try {
+            xProgram = loadXml(xmlFile);
+        } catch (IllegalArgumentException e) {
+            System.out.println(e.getMessage());
+            throw e;
+        }
+        try {
+            collection = initFactory();
+            validateLabels(collection.getInstructions(), collection.getDefinedLabels());
+            buildFunctions();
+            validateFunction();
+        } catch (IllegalArgumentException e) {
+            System.out.println(e.getMessage());
+            throw e;
+        }
+        try {
+            buildProgram(program, collection.getInstructions(), collection.getDefinedLabels());
+        } catch (IllegalArgumentException e) {
+            System.out.println(e.getMessage());
+            throw e;
+        }
+        ((SprogramImpl)program).setFunctions(functions);
+
+        return program;
+    }
+    //opens the xml file and loads it into an XProgram object
+    private XProgram loadXml(File xmlFile) throws IllegalArgumentException {
+        if (xmlFile == null||!xmlFile.getName().toLowerCase().endsWith(".xml")) {
+            assert xmlFile != null;
+            throw new IllegalArgumentException("Invalid file type: " + xmlFile.getName()
+                    + " (expected .xml)");
+        }
+        if ( !xmlFile.exists() || !xmlFile.isFile()) {
+            throw new IllegalArgumentException("XML file not found: " + xmlFile);
+        }
+        // 2. Unmarshal XML into FunctionExecuter object using JAXB
+        try {
+            JAXBContext context = JAXBContext.newInstance(XProgram.class);
+            Unmarshaller unmarshaller = context.createUnmarshaller();
+            xProgram =  (XProgram) unmarshaller.unmarshal(xmlFile);
+        } catch (JAXBException e) {
+            throw new RuntimeException("Failed to parse XML: " + e.getMessage(), e);
+        }
+        return xProgram;
+    }
+
+    private instructionCollect initFactory()
+    {
+        program = new SprogramImpl(xProgram.getName());
+        List<XOp> sInstructions = xProgram.getInstructions();
+        if (sInstructions == null || sInstructions.isEmpty()) {
+            throw new IllegalArgumentException("Invalid program: no instructions defined.");
+        }
+        instructionCollect collection = new instructionCollect(sInstructions);
+        collection.extractLabels();
+
+        xFunctions = xProgram.getFunctions();
+
+        return collection;
+    }
+
+    // Validates that all labels referenced in jump instructions exist in the program
+    private void validateLabels(List<XOp> sInstructions, LinkedHashSet<Label> definedLabels)  throws IllegalArgumentException {
+        // Check all instruction arguments for label references that are not defined
+        for (XOp inst : sInstructions) {
+            ArrayList<XOpArguments> args = (ArrayList<XOpArguments>) inst.getArguments();
+            if (args == null) continue; // if there are no arguments, skip
+            for (XOpArguments arg : args) {
+                String argName = arg.getName();
+                String argValue = arg.getValue();
+                // If this argument is a jump target label (argument name ends with "Label"):
+                if (argName.toLowerCase().endsWith("label")) {
+                    if ("EXIT".equalsIgnoreCase(argValue)) {
+                        // "EXIT" is considered a special target (program termination), skip existence check
+                        continue;
+                    }
+                    if (!definedLabels.contains(new LabelImpl(argValue))) {
+                        // Found a jump to a label that doesn't exist in the program
+                        throw new IllegalArgumentException("Invalid program: jump to undefined label \""
+                                + argValue + "\" in instruction \""
+                                + inst.getName() + "\".");
+                    }
+                }
+            }
+        }
+    }
+
+    private void buildFunctions()
+    {
+        if (xFunctions == null)
+            return;
+
+        xFunctions.forEach(xFunc -> {
+            String name = xFunc.getName();
+            FunctionExecutorImpl sFunc = new FunctionExecutorImpl(name);
+            sFunc.setUserString(xFunc.getUserString());
+            functionsMap.put(name, sFunc);
+            functions.add(sFunc);
+        });
+
+        xFunctions.forEach(xFunc -> {
+            List<XOp> sInstructions = xFunc.getInstructions();
+            if (sInstructions == null || sInstructions.isEmpty()) {
+                throw new IllegalArgumentException("Invalid function: " + xFunc.getName() + " no instructions defined.");
+            }
+            instructionCollect collection = new instructionCollect(sInstructions);
+            collection.extractLabels();
+
+            FunctionExecutor func = functionsMap.get(xFunc.getName());
+
+            validateLabels(collection.getInstructions(), collection.getDefinedLabels());
+            buildProgram(func, collection.getInstructions(), collection.getDefinedLabels());
+        });
+
+    }
+    private void validateFunction()
+    {
+
+    }
+
+    // 4. Build internal Program object
+    public void buildProgram(FunctionExecutor program, List<XOp> sInstructions, LinkedHashSet<Label> definedLabels ) throws IllegalArgumentException
+    {
+        // Prepare a set to track all variable names used (for initialization)
+        Set<VariableImpl> allVars = new HashSet<>();
+        Set<VariableImpl> inputVars = new TreeSet<>(
+                Comparator.comparing(VariableImpl::getRepresentation)
+        );
+        Label lbl;
+        String labelRegex = "L\\d+"; // regex pattern for valid labels like L1, L2, etc.
+        int i = 1;
+
+        // Convert each SInstruction to an AbstractOpBasic object and add to program
+        for (XOp inst : sInstructions) {
+            String cmdName = inst.getName();    // e.g., INCREASE, ZERO_VARIABLE, etc.
+            String varName = inst.getVariable();  // e.g., "x1", "y", "z2"
+            String labelName = inst.getLabel();   // may be null
+            int varIndex;
+
+            if (labelName == null || labelName.equals( FixedLabel.EMPTY.getLabelRepresentation() )|| labelName.isEmpty())
+                lbl = FixedLabel.EMPTY;
+           else  if (labelName.equals( FixedLabel.EXIT.getLabelRepresentation()))
+            {
+             lbl = FixedLabel.EXIT;
+            }
+            else
+                lbl = new LabelImpl(labelName);
+
+            // Add the main variable to the set of variables
+            if (varName == null || varName.isEmpty())
+                throw new IllegalArgumentException("Instruction missing variable: " + cmdName);
+            if(!varName.equals("y"))
+                varIndex = Integer.parseInt(varName.substring(1)); // extract index after first char
+            else
+                varIndex = 0; // for result variable "y", index is 0
+            VariableType vType = varName.equals("y") ? VariableType.RESULT :
+                    (varName.startsWith("x") ? VariableType.INPUT : VariableType.WORK);
+            VariableImpl curVar = new VariableImpl(vType, varIndex);
+
+
+            allVars.add(curVar);  // track this variable for initialization
+            if(// if it's an input variable, track in inputVars list too
+                    vType.equals( VariableType.INPUT))  {
+                inputVars.add(curVar);
+            }
+
+            AbstractOpBasic op;  // will point to a new instruction object
+            // Determine which specific AbstractOpBasic subclass to instantiate based on the command name
+            switch (cmdName) {
+                case "INCREASE":
+                    op = new OpIncrease(curVar, lbl);
+                    break;
+                case "DECREASE":
+                    op = new OpDecrease(curVar, lbl);
+                    break;
+                case "NEUTRAL":
+                    op = new OpNeutral(curVar, lbl);
+                    break;
+                case "JUMP_NOT_ZERO": {
+                    // JumpNotZero needs the target label to jump to if variable != 0
+                    String targetLabelName = getArgumentValue(inst, "JNZLabel");
+                    Label targetLabel;
+                    if (targetLabelName.equals( FixedLabel.EXIT.getLabelRepresentation())) {
+                        targetLabel = FixedLabel.EXIT;
+                    } else if (targetLabelName.equals(FixedLabel.EMPTY.getLabelRepresentation())) {
+                       targetLabel = FixedLabel.EMPTY;
+                    }
+                    else
+                        targetLabel = new LabelImpl(Integer.parseInt(targetLabelName.substring(1)));
+
+                    op = new OpJumpNotZero(curVar,targetLabel,lbl);
+                    break;
+                }
+                case "JUMP_ZERO": {
+                    String targetLabelName = getArgumentValue(inst, "JZLabel");
+                    Label targetLabel;
+                    if (targetLabelName.equals( FixedLabel.EXIT.getLabelRepresentation())) {
+                        targetLabel = FixedLabel.EXIT;
+                    } else if (targetLabelName.equals(FixedLabel.EMPTY.getLabelRepresentation())) {
+                        targetLabel = FixedLabel.EMPTY;
+                    }
+                    else
+                        targetLabel = new LabelImpl(Integer.parseInt(targetLabelName.substring(1)));
+                    op = new OpJumpZero(curVar, lbl, targetLabel);
+                    break;
+                }
+                case "GOTO_LABEL": {
+                    String targetLabelName = getArgumentValue(inst, "gotoLabel");
+                    Label targetLabel;
+                    if (targetLabelName.equals( FixedLabel.EXIT.getLabelRepresentation())) {
+                        targetLabel = FixedLabel.EXIT;
+                    } else if (targetLabelName.equals(FixedLabel.EMPTY.getLabelRepresentation())) {
+                        targetLabel = FixedLabel.EMPTY;
+                    }
+                    else
+                        targetLabel = new LabelImpl(Integer.parseInt(targetLabelName.substring(1)));
+
+                    op = new OpGoToLabel(curVar, lbl, targetLabel);
+                    break;
+                }
+                case "ASSIGNMENT": {
+                    // Assignment: copies one variable's value to another
+                    String srcVarName = getArgumentValue(inst, "assignedVariable");
+                    VariableImpl srcVar = new VariableImpl(srcVarName.equals("y") ? VariableType.RESULT :
+                            (srcVarName.startsWith("x") ? VariableType.INPUT : VariableType.WORK), Integer.parseInt(srcVarName.substring(1)))
+                    ;
+                    allVars.add(srcVar);  // source variable also involved
+                    if(// if it's an input variable, track in inputVars list too
+                            srcVar.getType() == VariableType.INPUT && !inputVars.contains(curVar)) {
+                        inputVars.add(srcVar);
+                    }
+                    op = new OpAssignment(curVar, lbl, srcVar);
+                    break;
+                }
+                case "CONSTANT_ASSIGNMENT": {
+                    String constValStr = getArgumentValue(inst, "constantValue");
+                    Long constVal = Long.parseLong(constValStr);
+                    op = new OpConstantAssigment(curVar, lbl, constVal);
+                    break;
+                }
+                case "JUMP_EQUAL_CONSTANT": {
+                    String targetLabelName = getArgumentValue(inst, "JEConstantLabel");
+                    String constValStr = getArgumentValue(inst, "constantValue");
+                    long constVal;
+                    try {
+                        constVal = Long.parseLong(constValStr);
+                    } catch (NumberFormatException e) {
+                        throw new IllegalArgumentException("Invalid constant value: " + constValStr
+                                + " (expected a valid integer)");
+                    }
+                    Label targetLabel;
+                    if (targetLabelName.equals( FixedLabel.EXIT.getLabelRepresentation())) {
+                        targetLabel = FixedLabel.EXIT;
+                    } else if (targetLabelName.equals(FixedLabel.EMPTY.getLabelRepresentation())) {
+                        targetLabel = FixedLabel.EMPTY;
+                    }
+                    else
+                        targetLabel = new LabelImpl(Integer.parseInt(targetLabelName.substring(1)));
+                    op = new OpJumpEqualConstant(curVar, lbl, targetLabel, constVal);
+
+                    break;
+                }
+                    case "JUMP_EQUAL_VARIABLE": {
+                        String targetLabelName = getArgumentValue(inst, "JEVariableLabel");
+                        String otherVarName = getArgumentValue(inst, "variableName");
+                        VariableImpl otherVar = new VariableImpl(otherVarName.equals("y") ? VariableType.RESULT :
+                                (otherVarName.startsWith("x") ? VariableType.INPUT : VariableType.WORK), Integer.parseInt(otherVarName.substring(1)))
+                                ;
+                        allVars.add(otherVar);  // second variable used in comparison
+                        if(// if it's an input variable, track in inputVars list too
+                                otherVar.getType() == VariableType.INPUT && !inputVars.contains(curVar)) {
+                            inputVars.add(otherVar);
+                        }
+                        Label targetLabel;
+                        if (targetLabelName.equals( FixedLabel.EXIT.getLabelRepresentation())) {
+                            targetLabel = FixedLabel.EXIT;
+                        } else if (targetLabelName.equals(FixedLabel.EMPTY.getLabelRepresentation())) {
+                            targetLabel = FixedLabel.EMPTY;
+                        }
+                        else
+                            targetLabel = new LabelImpl(Integer.parseInt(targetLabelName.substring(1)));
+                        op = new OpJumpEqualVariable(curVar, lbl, targetLabel, otherVar);
+                        break;
+                    }
+                    case "ZERO_VARIABLE":
+                        op = new OpZeroVariable(curVar, lbl);
+                        break;
+                    case "JUMP_EQUAL_FUNCTION":
+                    {
+                        String targetLabelName = getArgumentValue(inst, "JEFunctionLabel");
+                        String funcName = getArgumentValue(inst, "functionName");
+                        String functionArguments = getArgumentValue(inst, "functionArguments");
+
+                        Label targetLabel;
+                        if (targetLabelName.equals( FixedLabel.EXIT.getLabelRepresentation())) {
+                            targetLabel = FixedLabel.EXIT;
+                        } else if (targetLabelName.equals(FixedLabel.EMPTY.getLabelRepresentation())) {
+                            targetLabel = FixedLabel.EMPTY;
+                        }
+                        else
+                            targetLabel = new LabelImpl(Integer.parseInt(targetLabelName.substring(1)));
+                        extractVarFromArgs( functionArguments,  inputVars,  allVars);
+                        op = new OPJumpEqualFunction(curVar, lbl, funcName, functionArguments, targetLabel, functionsMap.get(funcName));
+                        break;
+                    }
+                    case "QUOTE": {
+                        String funcName = getArgumentValue(inst, "functionName");
+                        String functionArguments = getArgumentValue(inst, "functionArguments");
+                        FunctionExecutor function = functionsMap.get(funcName);
+                        extractVarFromArgs( functionArguments,  inputVars,  allVars);
+                        op = new OPQuote(curVar, lbl, funcName, functionArguments, function);
+                        break;
+                    }
+                    default:
+                        throw new IllegalArgumentException("Unknown instruction name: " + cmdName);
+                }
+                if (lbl != FixedLabel.EXIT && lbl != FixedLabel.EMPTY) {
+                    program.addLabel(lbl, op);
+                }
+
+                i++;
+
+                program.getOps().add(op);  // add the constructed operation to the program's list
+            }
+            // Also ensure the special result variable "y" exists and is initialized to 0
+        allVars.add(VariableImpl.RESULT);
+        program.addLabelSet(definedLabels);
+        //sort input vars by there get representation method
+        program.setInputVars(inputVars);
+        program.setAllVars(allVars);
+        program.init();
+    }
+
+    public static boolean isXYZThenNumber(String theString) {
+        return theString != null && theString.matches("^[xyz]\\d+$");
+    }
+
+    private void extractVarFromArgs(String functionArguments, Set<VariableImpl> inputVars, Set<VariableImpl> allVars) {
+        // this function extracts variable names from a comma-separated argument string
+
+        List<String> args = Arrays.stream(functionArguments.split(","))
+                .map(String::trim)
+                .toList();
+        for (String arg : args) {
+            String cleanArg = arg.replace("(", "").replace(")", "");
+            if (isXYZThenNumber(cleanArg)) {
+                VariableImpl tmpVar = new VariableImpl(cleanArg);
+                if (cleanArg.startsWith("x")) {
+                    inputVars.add(tmpVar);
+                }
+                allVars.add(tmpVar);
+            }
+        }
+    }
+
+
+    private String getArgumentValue(XOp inst, String argName) {
+        ArrayList<XOpArguments> args = (ArrayList<XOpArguments>) inst.getArguments();
+        if (args == null) {
+            throw new IllegalArgumentException("Instruction \"" + inst.getName()
+                    + "\" is missing argument: " + argName);
+        }
+        for (XOpArguments arg : args) {
+            if (argName.equals(arg.getName())) {
+                return arg.getValue();
+            }
+        }
+        // If not found by name, throw an error
+        throw new IllegalArgumentException("Instruction \"" + inst.getName()
+                + "\" is missing argument: " + argName);
+    }
+}
+
+
+
